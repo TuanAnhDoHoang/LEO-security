@@ -1,7 +1,11 @@
 """
 run_demo.py — Chạy toàn bộ demo tự động trong 1 terminal
 ──────────────────────────────────────────────────────────
-Khởi động satellite + receiver + eavesdropper ở background,
+Transfer order:
+  Forward: Sender → SAT-A → Eavesdropper → SAT-B → Receiver
+  Reverse: Receiver → SAT-B → Eavesdropper → SAT-A → Sender
+
+Khởi động SAT-A + SAT-B + Eavesdropper + Receiver ở background,
 sau đó chạy từng phase:
   Phase 1 — Plaintext
   Phase 2 — Encrypted (E2EE)
@@ -26,16 +30,25 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.exceptions import InvalidTag
+from cryptography import x509
+from cryptography.hazmat.primitives.asymmetric import ed25519
 
 # ── Màu sắc ───────────────────────────────────────────────────────────────────
 R = "\033[91m"; G = "\033[92m"; Y = "\033[93m"
 C = "\033[96m"; D = "\033[2m";  B = "\033[1m"; X = "\033[0m"
 
 # ── Ports ─────────────────────────────────────────────────────────────────────
-SAT_LISTEN  = 9000
-SAT_FORWARD = 9001
-KEY_PORT    = 9100
-EAVES_PORT  = 9002
+# Transfer order: Sender → SAT-A → Eavesdropper → SAT-B → Receiver
+SAT_A_LISTEN  = 9000   # SAT-A nhận từ Sender
+EAVES_FROM_A  = 9002   # Eavesdropper nhận từ SAT-A
+SAT_B_LISTEN  = 9003   # SAT-B nhận từ Eavesdropper
+RECV_PORT     = 9001   # Receiver nhận từ SAT-B
+
+# Reverse: Receiver → SAT-B → Eavesdropper → SAT-A → Sender
+EAVES_FROM_B  = 9005   # Eavesdropper nhận từ SAT-B (reverse)
+SAT_A_REV     = 9006   # SAT-A nhận từ Eavesdropper (reverse)
+
+KEY_PORT      = 9100   # Key exchange (TCP direct)
 
 # ── Hypatia Bước 1 params ─────────────────────────────────────────────────────
 DELAY_MS  = 6.0
@@ -61,11 +74,12 @@ def header(title, color=C):
 
 import random
 
-class Satellite:
+class SatelliteA:
+    """SAT-A: nhận từ Sender, forward đến Eavesdropper."""
     def __init__(self):
         self.sock_in  = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock_in.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.sock_in.bind(("127.0.0.1", SAT_LISTEN))
+        self.sock_in.bind(("127.0.0.1", SAT_A_LISTEN))
         self.sock_in.settimeout(0.5)
         self.sock_out = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.running  = False
@@ -78,8 +92,7 @@ class Satellite:
             return
         delay = max(0, random.gauss(DELAY_MS, JITTER_MS)) / 1000
         time.sleep(delay)
-        self.sock_out.sendto(raw, ("127.0.0.1", SAT_FORWARD))
-        self.sock_out.sendto(raw, ("127.0.0.1", EAVES_PORT))   # tap
+        self.sock_out.sendto(raw, ("127.0.0.1", EAVES_FROM_A))
         self.stats["tx"] += 1
 
     def _loop(self):
@@ -97,11 +110,89 @@ class Satellite:
     def stop(self): self.running = False
 
 
+class SatelliteB:
+    """SAT-B: nhận từ Eavesdropper, forward đến Receiver."""
+    def __init__(self):
+        self.sock_in  = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock_in.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.sock_in.bind(("127.0.0.1", SAT_B_LISTEN))
+        self.sock_in.settimeout(0.5)
+        self.sock_out = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.running  = False
+        self.stats    = {"rx": 0, "tx": 0, "drop": 0}
+
+    def _forward(self, raw):
+        self.stats["rx"] += 1
+        if random.random() < LOSS_PCT / 100:
+            self.stats["drop"] += 1
+            return
+        delay = max(0, random.gauss(DELAY_MS, JITTER_MS)) / 1000
+        time.sleep(delay)
+        self.sock_out.sendto(raw, ("127.0.0.1", RECV_PORT))
+        self.stats["tx"] += 1
+
+    def _loop(self):
+        while self.running:
+            try:
+                raw, _ = self.sock_in.recvfrom(65535)
+                threading.Thread(target=self._forward, args=(raw,), daemon=True).start()
+            except socket.timeout:
+                continue
+
+    def start(self):
+        self.running = True
+        threading.Thread(target=self._loop, daemon=True).start()
+
+    def stop(self): self.running = False
+
+
+class EavesdropperRelay:
+    """Eavesdropper: nhận từ SAT-A, sniff, forward đến SAT-B."""
+    def __init__(self):
+        self.sock_in  = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock_in.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.sock_in.bind(("127.0.0.1", EAVES_FROM_A))
+        self.sock_in.settimeout(0.5)
+        self.sock_out = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.running  = False
+        self.log      = []
+
+    def _entropy(self, data):
+        if not data: return 0.0
+        c = collections.Counter(data); n = len(data)
+        return -sum((v/n)*math.log2(v/n) for v in c.values())
+
+    def _loop(self):
+        while self.running:
+            try:
+                raw, _ = self.sock_in.recvfrom(65535)
+                if len(raw) < 7: continue
+                ptype, seq, _ = struct.unpack("!BIH", raw[:7])
+                payload = raw[7:]
+                e = self._entropy(payload)
+
+                if ptype == 0x01:
+                    content = payload.decode(errors="replace")
+                    self.log.append(("readable", seq, content, e))
+                else:
+                    self.log.append(("encrypted", seq, payload[:16].hex(), e))
+
+                # Forward to SAT-B (relay)
+                self.sock_out.sendto(raw, ("127.0.0.1", SAT_B_LISTEN))
+            except socket.timeout: continue
+
+    def start(self):
+        self.running = True
+        threading.Thread(target=self._loop, daemon=True).start()
+
+    def stop(self): self.running = False
+
+
 class Receiver:
     def __init__(self):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.sock.bind(("127.0.0.1", SAT_FORWARD))
+        self.sock.bind(("127.0.0.1", RECV_PORT))
         self.sock.settimeout(0.5)
         self.key_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.key_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -114,17 +205,57 @@ class Receiver:
         self.seen_seq = set()
 
     def _key_loop(self):
+        CERTS_DIR = os.path.join(os.path.dirname(__file__), "certs")
+        with open(os.path.join(CERTS_DIR, "ca.crt"), "rb") as f:
+            ca_cert = x509.load_pem_x509_certificate(f.read())
+        with open(os.path.join(CERTS_DIR, "receiver.crt"), "rb") as f:
+            my_cert_raw = f.read()
+            my_cert = x509.load_pem_x509_certificate(my_cert_raw)
+        with open(os.path.join(CERTS_DIR, "receiver.key"), "rb") as f:
+            my_key = serialization.load_pem_private_key(f.read(), password=None)
+
         while self.running:
             try:
                 conn, _ = self.key_sock.accept()
-                peer_raw   = conn.recv(32)
+                
+                # Helper for recv
+                def rx_e(s, n):
+                    d = b''
+                    while len(d) < n:
+                        c = s.recv(n - len(d))
+                        if not c: raise EOFError
+                        d += c
+                    return d
+
+                # 1. Nhận từ sender
+                s_cert_len = struct.unpack("!I", rx_e(conn, 4))[0]
+                s_cert_raw = rx_e(conn, s_cert_len)
+                s_pub_len  = struct.unpack("!I", rx_e(conn, 4))[0]
+                s_pub_raw  = rx_e(conn, s_pub_len)
+                s_sig_len  = struct.unpack("!I", rx_e(conn, 4))[0]
+                s_sig_raw  = rx_e(conn, s_sig_len)
+
+                # 2. Verify
+                peer_cert = x509.load_pem_x509_certificate(s_cert_raw)
+                ca_cert.public_key().verify(peer_cert.signature, peer_cert.tbs_certificate_bytes)
+                peer_cert.public_key().verify(s_sig_raw, s_pub_raw)
+
+                # 3. Trả lời
                 session_id = os.urandom(16)
-                priv = X25519PrivateKey.generate()
-                pub  = priv.public_key().public_bytes(
+                e_priv = X25519PrivateKey.generate()
+                e_pub  = e_priv.public_key().public_bytes(
                     serialization.Encoding.Raw, serialization.PublicFormat.Raw)
-                conn.sendall(pub); conn.sendall(session_id); conn.close()
-                peer = X25519PublicKey.from_public_bytes(peer_raw)
-                shared = priv.exchange(peer)
+                my_sig = my_key.sign(e_pub)
+
+                tx = (struct.pack("!I", len(my_cert_raw)) + my_cert_raw +
+                      struct.pack("!I", len(e_pub)) + e_pub +
+                      struct.pack("!I", len(my_sig)) + my_sig +
+                      session_id)
+                conn.sendall(tx)
+                conn.close()
+
+                peer = X25519PublicKey.from_public_bytes(s_pub_raw)
+                shared = e_priv.exchange(peer)
                 key = HKDF(algorithm=hashes.SHA256(), length=32,
                            salt=None, info=b"LEO-SAT-E2EE-HCMC-SGP").derive(shared)
                 self.session = {"aesgcm": AESGCM(key), "session_id": session_id}
@@ -167,60 +298,59 @@ class Receiver:
     def stop(self): self.running = False
 
 
-class Eavesdropper:
-    def __init__(self):
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.sock.bind(("127.0.0.1", EAVES_PORT))
-        self.sock.settimeout(0.5)
-        self.running = False
-        self.log     = []
-
-    def _entropy(self, data):
-        if not data: return 0.0
-        c = collections.Counter(data); n = len(data)
-        return -sum((v/n)*math.log2(v/n) for v in c.values())
-
-    def _loop(self):
-        while self.running:
-            try:
-                raw, _ = self.sock.recvfrom(65535)
-                if len(raw) < 7: continue
-                ptype, seq, _ = struct.unpack("!BIH", raw[:7])
-                payload = raw[7:]
-                e = self._entropy(payload)
-
-                if ptype == 0x01:
-                    content = payload.decode(errors="replace")
-                    self.log.append(("readable", seq, content, e))
-                else:
-                    self.log.append(("encrypted", seq, payload[:16].hex(), e))
-            except socket.timeout: continue
-
-    def start(self):
-        self.running = True
-        threading.Thread(target=self._loop, daemon=True).start()
-
-    def stop(self): self.running = False
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # KEY EXCHANGE (sender side)
 # ─────────────────────────────────────────────────────────────────────────────
 def key_exchange_client():
-    priv = X25519PrivateKey.generate()
-    pub  = priv.public_key().public_bytes(
+    CERTS_DIR = os.path.join(os.path.dirname(__file__), "certs")
+    with open(os.path.join(CERTS_DIR, "ca.crt"), "rb") as f:
+        ca_cert = x509.load_pem_x509_certificate(f.read())
+    with open(os.path.join(CERTS_DIR, "sender.crt"), "rb") as f:
+        my_cert_raw = f.read()
+        my_cert = x509.load_pem_x509_certificate(my_cert_raw)
+    with open(os.path.join(CERTS_DIR, "sender.key"), "rb") as f:
+        my_key = serialization.load_pem_private_key(f.read(), password=None)
+
+    e_priv = X25519PrivateKey.generate()
+    e_pub  = e_priv.public_key().public_bytes(
         serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+    
+    sig = my_key.sign(e_pub)
+    tx  = (struct.pack("!I", len(my_cert_raw)) + my_cert_raw +
+           struct.pack("!I", len(e_pub)) + e_pub +
+           struct.pack("!I", len(sig)) + sig)
+
     ks = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     for _ in range(10):
         try: ks.connect(("127.0.0.1", KEY_PORT)); break
         except: time.sleep(0.2)
-    ks.sendall(pub)
-    peer_raw   = ks.recv(32)
-    session_id = ks.recv(16)
+    
+    ks.sendall(tx)
+    
+    def rx_e(s, n):
+        d = b''
+        while len(d) < n:
+            c = s.recv(n - len(d))
+            if not c: raise EOFError
+            d += c
+        return d
+
+    r_cert_len = struct.unpack("!I", rx_e(ks, 4))[0]
+    r_cert_raw = rx_e(ks, r_cert_len)
+    r_pub_len  = struct.unpack("!I", rx_e(ks, 4))[0]
+    r_pub_raw  = rx_e(ks, r_pub_len)
+    r_sig_len  = struct.unpack("!I", rx_e(ks, 4))[0]
+    r_sig_raw  = rx_e(ks, r_sig_len)
+    session_id = rx_e(ks, 16)
     ks.close()
-    peer   = X25519PublicKey.from_public_bytes(peer_raw)
-    shared = priv.exchange(peer)
+
+    # Verify
+    peer_cert = x509.load_pem_x509_certificate(r_cert_raw)
+    ca_cert.public_key().verify(peer_cert.signature, peer_cert.tbs_certificate_bytes)
+    peer_cert.public_key().verify(r_sig_raw, r_pub_raw)
+
+    peer   = X25519PublicKey.from_public_bytes(r_pub_raw)
+    shared = e_priv.exchange(peer)
     key    = HKDF(algorithm=hashes.SHA256(), length=32,
                   salt=None, info=b"LEO-SAT-E2EE-HCMC-SGP").derive(shared)
     return AESGCM(key), session_id
@@ -231,7 +361,7 @@ def send_plain(n=8):
     for seq in range(n):
         msg = MESSAGES[seq % len(MESSAGES)]
         pkt = struct.pack("!BIH", 0x01, seq, len(msg)) + msg
-        sock.sendto(pkt, ("127.0.0.1", SAT_LISTEN))
+        sock.sendto(pkt, ("127.0.0.1", SAT_A_LISTEN))
         time.sleep(0.3)
     sock.close()
 
@@ -245,7 +375,7 @@ def send_encrypted(n=8):
         aad   = session_id + struct.pack("!I", seq)
         ct    = aesgcm.encrypt(nonce, msg, aad)
         pkt   = struct.pack("!BIH", 0x02, seq, len(ct)) + nonce + ct
-        sock.sendto(pkt, ("127.0.0.1", SAT_LISTEN))
+        sock.sendto(pkt, ("127.0.0.1", SAT_A_LISTEN))
         time.sleep(0.3)
     sock.close()
 
@@ -259,7 +389,7 @@ def send_replay(n=5):
     ct    = aesgcm.encrypt(nonce, msg, aad)
     pkt   = struct.pack("!BIH", 0x02, 0, len(ct)) + nonce + ct   # seq=0 cố định
     for _ in range(n):
-        sock.sendto(pkt, ("127.0.0.1", SAT_LISTEN))
+        sock.sendto(pkt, ("127.0.0.1", SAT_A_LISTEN))
         time.sleep(0.2)
     sock.close()
 
@@ -303,26 +433,33 @@ def show_recv_log(recv, phase):
 def main():
     print(f"\n{C}{'═'*62}")
     print(f"  🛰  LEO EAVESDROPPING & E2EE DEMO")
-    print(f"  Route: HCMC (GS-46) → [SAT] → Singapore (GS-63)")
+    print(f"{'═'*62}{X}")
+    print(f"  Transfer order:")
+    print(f"    Forward : Sender → SAT-A → Eavesdropper → SAT-B → Receiver")
+    print(f"    Reverse : Receiver → SAT-B → Eavesdropper → SAT-A → Sender")
     print(f"  Delay: {DELAY_MS}ms ± {JITTER_MS}ms  Loss: {LOSS_PCT}%  [Hypatia Bước 1]")
     print(f"{'═'*62}{X}\n")
 
     # Khởi động các component
-    sat   = Satellite()
+    sat_a = SatelliteA()
+    sat_b = SatelliteB()
+    eaves = EavesdropperRelay()
     recv  = Receiver()
-    eaves = Eavesdropper()
 
-    sat.start(); time.sleep(0.1)
-    recv.start(); time.sleep(0.2)
+    sat_a.start(); time.sleep(0.1)
+    sat_b.start(); time.sleep(0.1)
     eaves.start(); time.sleep(0.1)
+    recv.start();  time.sleep(0.2)
 
-    print(f"  {G}✓ Satellite Node   : :{SAT_LISTEN} → :{SAT_FORWARD}{X}")
-    print(f"  {G}✓ Receiver (SGP)   : :{SAT_FORWARD}{X}")
-    print(f"  {G}✓ Eavesdropper     : :{EAVES_PORT}  (tap){X}")
+    print(f"  {G}✓ SAT-A (sender)   : :{SAT_A_LISTEN} → :{EAVES_FROM_A}{X}")
+    print(f"  {R}✓ Eavesdropper     : :{EAVES_FROM_A} → :{SAT_B_LISTEN}  (MitM relay){X}")
+    print(f"  {G}✓ SAT-B (receiver) : :{SAT_B_LISTEN} → :{RECV_PORT}{X}")
+    print(f"  {G}✓ Receiver (SGP)   : :{RECV_PORT}{X}")
 
     # ── PHASE 1: PLAINTEXT ────────────────────────────────────────────────────
     header("PHASE 1 — PLAINTEXT TRANSMISSION", Y)
-    print(f"  Không mã hóa. Eavesdropper đọc được toàn bộ nội dung.\n")
+    print(f"  Không mã hóa. Eavesdropper đọc được toàn bộ nội dung.")
+    print(f"  Path: Sender → SAT-A → {R}Eavesdropper{X} → SAT-B → Receiver\n")
     input(f"  {D}[Enter để bắt đầu Phase 1...]{X}")
 
     eaves.log.clear(); recv.log.clear()
@@ -335,7 +472,8 @@ def main():
 
     # ── PHASE 2: ENCRYPTED ────────────────────────────────────────────────────
     header("PHASE 2 — E2EE: AES-256-GCM + ECDH X25519", G)
-    print(f"  Mã hóa đầu cuối. Eavesdropper chỉ thấy ciphertext ngẫu nhiên.\n")
+    print(f"  Mã hóa đầu cuối. Eavesdropper chỉ thấy ciphertext ngẫu nhiên.")
+    print(f"  Path: Sender → SAT-A → {R}Eavesdropper{X} → SAT-B → Receiver\n")
     input(f"  {D}[Enter để bắt đầu Phase 2...]{X}")
 
     eaves.log.clear(); recv.log.clear()
@@ -348,7 +486,8 @@ def main():
 
     # ── PHASE 3: REPLAY ATTACK ────────────────────────────────────────────────
     header("PHASE 3 — REPLAY ATTACK + DEFENSE", R)
-    print(f"  Gửi lại cùng 1 packet 5 lần. Receiver chặn từ lần 2 trở đi.\n")
+    print(f"  Gửi lại cùng 1 packet 5 lần. Receiver chặn từ lần 2 trở đi.")
+    print(f"  Path: Sender → SAT-A → {R}Eavesdropper{X} → SAT-B → Receiver\n")
     input(f"  {D}[Enter để bắt đầu Phase 3...]{X}")
 
     eaves.log.clear(); recv.log.clear()
@@ -364,6 +503,7 @@ def main():
 
     # ── TỔNG KẾT ─────────────────────────────────────────────────────────────
     header("TỔNG KẾT DEMO", C)
+    print(f"  Transfer: Sender → SAT-A → Eavesdropper → SAT-B → Receiver\n")
     print(f"  {'Tiêu chí':<35} {'Plaintext':>12}  {'E2EE':>8}")
     div()
     print(f"  {'Eavesdropper đọc được payload':<35} {R+'CÓ':>12}{X}  {G+'KHÔNG':>8}{X}")
@@ -372,10 +512,11 @@ def main():
     print(f"  {'Chống replay':<35} {'KHÔNG':>12}  {'CÓ':>8}")
     print(f"  {'Mã hóa':<35} {'KHÔNG':>12}  {'AES-256':>8}")
     div()
-    print(f"\n  Satellite delay: {sat.stats}")
+    print(f"\n  SAT-A stats: {sat_a.stats}")
+    print(f"  SAT-B stats: {sat_b.stats}")
     print()
 
-    sat.stop(); recv.stop(); eaves.stop()
+    sat_a.stop(); sat_b.stop(); eaves.stop(); recv.stop()
 
 
 if __name__ == "__main__":

@@ -1,0 +1,13 @@
+node_modules/
+dashboard/node_modules/
+dashboard/dist/
+eavesdropper/__pycache__/
+eavesdropper/.venv/
+eavesdropper/env/
+eavesdropper/venv/
+.git/
+.vscode/
+.idea/
+*.log
+npm-debug.log*
+.DS_Store
