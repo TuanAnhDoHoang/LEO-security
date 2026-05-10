@@ -207,6 +207,10 @@ async function startEavesdropperDemo(mode: string = "plain") {
   }
 }
 
+async function startDdosDemo(){
+  
+}
+
 // WebSocket connection handler
 wss.on("connection", (ws) => {
   console.log("Client connected");
