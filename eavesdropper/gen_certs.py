@@ -76,24 +76,39 @@ def save_cert(cert, filename):
         f.write(cert.public_bytes(serialization.Encoding.PEM))
 
 def main():
-    os.makedirs("eavesdropper/certs", exist_ok=True)
+    os.makedirs("certs", exist_ok=True)
     
     print("Generating CA...")
     ca_key, ca_cert = generate_ca()
-    save_key(ca_key, "eavesdropper/certs/ca.key")
-    save_cert(ca_cert, "eavesdropper/certs/ca.crt")
+    save_key(ca_key, "certs/ca.key")
+    save_cert(ca_cert, "certs/ca.crt")
     
     print("Generating Sender Cert (GS-46)...")
     s_key, s_cert = generate_cert(ca_key, ca_cert, u"GS-46-HCMC")
-    save_key(s_key, "eavesdropper/certs/sender.key")
-    save_cert(s_cert, "eavesdropper/certs/sender.crt")
+    save_key(s_key, "certs/sender.key")
+    save_cert(s_cert, "certs/sender.crt")
     
     print("Generating Receiver Cert (GS-63)...")
     r_key, r_cert = generate_cert(ca_key, ca_cert, u"GS-63-Singapore")
-    save_key(r_key, "eavesdropper/certs/receiver.key")
-    save_cert(r_cert, "eavesdropper/certs/receiver.crt")
+    save_key(r_key, "certs/receiver.key")
+    save_cert(r_cert, "certs/receiver.crt")
     
-    print("Done! Certificates generated in eavesdropper/certs/")
+    print("Generating SAT-A Cert...")
+    sata_key, sata_cert = generate_cert(ca_key, ca_cert, u"SAT-A-Relay")
+    save_key(sata_key, "certs/sat-a.key")
+    save_cert(sata_cert, "certs/sat-a.crt")
+
+    print("Generating SAT-B Cert...")
+    satb_key, satb_cert = generate_cert(ca_key, ca_cert, u"SAT-B-Relay")
+    save_key(satb_key, "certs/sat-b.key")
+    save_cert(satb_cert, "certs/sat-b.crt")
+
+    print("Generating SAT-C Cert...")
+    satc_key, satc_cert = generate_cert(ca_key, ca_cert, u"SAT-C-Relay")
+    save_key(satc_key, "certs/sat-c.key")
+    save_cert(satc_cert, "certs/sat-c.crt")
+
+    print("Done! Certificates generated in certs/")
 
 if __name__ == "__main__":
     main()

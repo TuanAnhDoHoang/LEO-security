@@ -79,6 +79,17 @@ function killAllProcesses() {
       }
     }
   });
+
+  // Aggressive cleanup of orphaned simulation scripts
+  try {
+    spawn("pkill", ["-f", "receiver.py"]);
+    spawn("pkill", ["-f", "satellite.py"]);
+    spawn("pkill", ["-f", "sender.py"]);
+    spawn("pkill", ["-f", "eavesdropper.py"]);
+  } catch {
+    // Ignore pkill errors
+  }
+
   simulation.processes = [];
   simulation.running = false;
   simulation.phase = "idle";
@@ -120,7 +131,7 @@ function spawnScript(scriptName: string, args: string[], role: string) {
       } else if (cleanLine.startsWith("[EAVESDROPPER]")) {
         roleToUse = "eavesdropper";
         cleanLine = cleanLine.replace("[EAVESDROPPER] ", "");
-      } else if (cleanLine.startsWith("[SAT-A]") || cleanLine.startsWith("[SAT-B]")) {
+      } else if (cleanLine.startsWith("[SAT-A]") || cleanLine.startsWith("[SAT-B]") || cleanLine.startsWith("[SAT-C]")) {
         roleToUse = "system";
       }
 
@@ -143,12 +154,9 @@ function spawnScript(scriptName: string, args: string[], role: string) {
 }
 
 async function startEavesdropperDemo(mode: string = "plain") {
-  if (simulation.running) {
-    broadcast({ type: "error", message: "Simulation already running. Stop it first." });
-    return;
-  }
-
+  // Unconditionally kill any existing session to prevent "already running" lockouts
   killAllProcesses();
+  
   simulation.running = true;
   simulation.phase = `eavesdropper-${mode}`;
 
@@ -163,13 +171,16 @@ async function startEavesdropperDemo(mode: string = "plain") {
     // 1. Receiver & Key Server
     spawnScript("receiver.py", ["--local", "--dashboard"], "receiver");
     
-    // 2. Satellite B (near receiver)
+    // 2. Satellite C (near receiver)
+    spawnScript("satellite.py", ["sat-c", "--local", "--dashboard"], "system");
+
+    // 3. Satellite B (middle relay)
     spawnScript("satellite.py", ["sat-b", "--local", "--dashboard"], "system");
 
-    // 3. Eavesdropper (MitM relay)
+    // 4. Eavesdropper (Passive Monitor)
     spawnScript("eavesdropper.py", ["--local", "--dashboard"], "eavesdropper");
 
-    // 4. Satellite A (near sender)
+    // 5. Satellite A (near sender)
     spawnScript("satellite.py", ["sat-a", "--local", "--dashboard"], "system");
 
     // Wait for servers to bind
@@ -179,14 +190,12 @@ async function startEavesdropperDemo(mode: string = "plain") {
     const senderProc = spawnScript("sender.py", [mode, "--local", "--dashboard"], "sender");
 
     senderProc.on("close", (code) => {
-      // When sender finished, we can consider the simulation complete
+      simulation.running = false;
       broadcast({
         type: "status",
         status: "stopped",
         message: `Simulation finished (sender exit code: ${code})`,
       });
-      // Optionally kill others, but usually we keep them running if user wants to see logs
-      // For this demo, let's keep them until user clicks "Stop" or starts a new one.
     });
 
   } catch (err: any) {

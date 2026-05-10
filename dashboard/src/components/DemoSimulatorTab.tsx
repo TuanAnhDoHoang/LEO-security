@@ -171,10 +171,9 @@ export default function DemoSimulatorTab({ active }: DemoSimulatorTabProps) {
             onChange={e => setMode(e.target.value)}
             disabled={status === 'running'}
           >
-            <option value="all">All Phases (Plain → E2EE → Replay)</option>
+            <option value="all">All Phases (Plain → E2EE)</option>
             <option value="plain">Phase 1: Plaintext Only</option>
             <option value="encrypted">Phase 2: Encrypted (E2EE)</option>
-            <option value="replay">Phase 3: Replay Attack</option>
           </select>
 
           {/* Attack buttons */}
@@ -235,8 +234,9 @@ export default function DemoSimulatorTab({ active }: DemoSimulatorTabProps) {
         gap: 24,
         flexWrap: 'wrap',
       }}>
-        <span>Forward: <span style={{ color: 'var(--cyan)' }}>Sender</span> → SAT-A → <span style={{ color: 'var(--red)' }}>Eavesdropper</span> → SAT-B → <span style={{ color: 'var(--green)' }}>Receiver</span></span>
-        <span>Delay: 6.0ms ± 0.9ms | Loss: 0.1% | Crypto: AES-256-GCM + ECDH X25519</span>
+        <span>Topology: <span style={{ color: 'var(--cyan)' }}>Sender</span> (10.0.0.1) → SAT-A → SAT-B → SAT-C → <span style={{ color: 'var(--green)' }}>Receiver</span> (10.0.0.3)</span>
+        <span>Eavesdropping: <span style={{ color: 'var(--red)' }}>Passive Sniffer</span> (10.0.0.1) monitor Sender</span>
+        <span>Crypto: End-to-End Encryption (AES-256-GCM + ECDH X25519)</span>
       </div>
 
       {/* 3-Column Log Grid */}
