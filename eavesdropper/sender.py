@@ -23,7 +23,7 @@ KEY_PORT         = 9100
 GREEN = "\033[92m"; CYAN = "\033[96m"; AMBER = "\033[93m"
 RED   = "\033[91m"; DIM  = "\033[2m";  RESET = "\033[0m"
 
-PACKET_COUNT = 50
+PACKET_COUNT = 5 
 INTERVAL_S   = 0.5
 
 MESSAGES = [

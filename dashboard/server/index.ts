@@ -12,12 +12,17 @@ import path from "path";
 import cors from "cors";
 
 import { fileURLToPath } from 'url';
+import dotenv from 'dotenv';
+
+dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const PORT = 3001;
 const EAVESDROPPER_DIR = path.resolve(__dirname, "../../eavesdropper");
+const DDOS_DIR = path.resolve(__dirname, "../../ddos/LEO");
+
 
 const app = express();
 app.use(cors());
@@ -65,6 +70,12 @@ function detectLogType(raw: string): string {
   return "info";
 }
 
+function ddosDetectLogType(avgIntervalMs: number) {
+  if (avgIntervalMs < 1.0)  return "attack";     // < 1ms   → TẤN CÔNG
+  if (avgIntervalMs < 10.0) return "warn";  // < 10ms  → CẢNH BÁO
+  return "secure";                             // ≥ 10ms  → BÌNH THƯỜNG
+}
+
 function killAllProcesses() {
   simulation.processes.forEach((proc) => {
     try {
@@ -94,7 +105,6 @@ function killAllProcesses() {
   simulation.running = false;
   simulation.phase = "idle";
 }
-
 /**
  * Run the eavesdropper demo using run_demo.py's inline components approach
  * but as 3 separate visible processes for the dashboard.
@@ -120,7 +130,7 @@ function spawnScript(scriptName: string, args: string[], role: string) {
     for (const line of lines) {
       let roleToUse = role;
       let cleanLine = stripAnsi(line);
-      
+
       // If the line already has a tag (from --dashboard flag), use it
       if (cleanLine.startsWith("[SENDER]")) {
         roleToUse = "sender";
@@ -156,7 +166,7 @@ function spawnScript(scriptName: string, args: string[], role: string) {
 async function startEavesdropperDemo(mode: string = "plain") {
   // Unconditionally kill any existing session to prevent "already running" lockouts
   killAllProcesses();
-  
+
   simulation.running = true;
   simulation.phase = `eavesdropper-${mode}`;
 
@@ -170,7 +180,7 @@ async function startEavesdropperDemo(mode: string = "plain") {
   try {
     // 1. Receiver & Key Server
     spawnScript("receiver.py", ["--local", "--dashboard"], "receiver");
-    
+
     // 2. Satellite C (near receiver)
     spawnScript("satellite.py", ["sat-c", "--local", "--dashboard"], "system");
 
@@ -207,8 +217,203 @@ async function startEavesdropperDemo(mode: string = "plain") {
   }
 }
 
-async function startDdosDemo(){
-  
+function ddosSpawnScript(scriptName: string, args: string[], role: string) {
+  const proc = spawn("python3", [scriptName, ...args], {
+    cwd: DDOS_DIR,
+    env: { ...process.env, PYTHONUNBUFFERED: "1" },
+    detached: true,
+  });
+
+  simulation.processes.push(proc);
+
+  const handleData = (data: Buffer) => {
+    const lines = data.toString().split("\n").filter((l: string) => l.trim());
+    for (const line of lines) {
+      let roleToUse = role;
+      let cleanLine = stripAnsi(line);
+
+      // If the line already has a tag (from --dashboard flag), use it
+      if (cleanLine.startsWith("[SENDER]")) {
+        roleToUse = "sender";
+        cleanLine = cleanLine.replace("[SENDER] ", "");
+      } else if (cleanLine.startsWith("[RECEIVER]")) {
+        roleToUse = "receiver";
+        cleanLine = cleanLine.replace("[RECEIVER] ", "");
+      } else if (cleanLine.startsWith("[SATELLITE]")) {
+        roleToUse = "system";
+      }
+
+      if (roleToUse === "receiver") {
+        const intervalMatch = cleanLine.match(/avg_interval=([\d.]+)ms/);
+        if (intervalMatch) {
+          const avgIntervalMs = parseFloat(intervalMatch[1]);
+          console.log("avg_interval:", avgIntervalMs, "ms");
+
+          const logType = ddosDetectLogType(avgIntervalMs);
+          broadcast({
+            type: "log",
+            role: roleToUse,
+            message: cleanLine,
+            logType,
+            timestamp: new Date().toISOString(),
+          });
+        } else {
+          // Broadcast receiver logs even if they don't contain avg_interval
+          const logType = detectLogType(line);
+          broadcast({
+            type: "log",
+            role: roleToUse,
+            message: cleanLine,
+            logType,
+            timestamp: new Date().toISOString(),
+          });
+        }
+      } else {
+        // Broadcast logs from sender and system
+        const logType = detectLogType(line);
+        broadcast({
+          type: "log",
+          role: roleToUse,
+          message: cleanLine,
+          logType,
+          timestamp: new Date().toISOString(),
+        });
+      }
+    }
+  };
+
+  proc.stdout?.on("data", handleData);
+  proc.stderr?.on("data", handleData);
+
+  return proc;
+}
+
+async function startDdosDemo(mode: string) {
+  // Unconditionally kill any existing session to prevent "already running" lockouts
+  killAllProcesses();
+
+  simulation.running = true;
+  simulation.phase = `ddos-${mode}`;
+
+  broadcast({
+    type: "status",
+    status: "starting",
+    phase: simulation.phase,
+    message: `Starting individual ddos components (${mode})...`,
+  });
+
+  console.log("Broad cast successly");
+
+  try {
+    // 1. Receiver & Key Server
+    ddosSpawnScript("receiver.py", ["--local"], "receiver");
+
+    // 2. Satellite C (near receiver)
+    ddosSpawnScript("satellite.py", ["127.0.0.1", "127.0.0.1", "9000", "9001"], "system");
+
+    // 3. Satellite B (middle relay)
+    ddosSpawnScript("satellite.py", ["127.0.0.1", "127.0.0.1", "9001", "9002"], "system");
+
+    // Wait for servers to bind
+    await new Promise(resolve => setTimeout(resolve, 1500));
+
+    // 5. Sender (client)
+    const senderProc = ddosSpawnScript("sender.py", [mode, "--local"], "sender");
+
+    senderProc.on("close", (code) => {
+      simulation.running = false;
+      broadcast({
+        type: "status",
+        status: "stopped",
+        message: `Simulation finished (sender exit code: ${code})`,
+      });
+    });
+
+  } catch (err: any) {
+    simulation.running = false;
+    broadcast({
+      type: "error",
+      message: `Failed to start simulation: ${err.message}`,
+    });
+  }
+}
+
+function startHping3() {
+  console.log("🔨 Starting hping3 DDoS attack...");
+  broadcast({
+    type: "log",
+    role: "eavesdropper",
+    message: "Starting hping3 DDoS attack: --udp --flood -d 6500 127.0.0.1 -p 9000",
+    logType: "attack",
+    timestamp: new Date().toISOString(),
+  });
+
+  const isRoot = process.getuid?.() === 0;
+  let hpingProc: ChildProcess;
+
+  if (isRoot) {
+    // Already running as root, no need for sudo
+    console.log("Running as root, spawning hping3 directly...");
+    hpingProc = spawn("hping3", ["--udp", "--flood", "-d", "6500", "127.0.0.1", "-p", "9000"], {
+      env: { ...process.env, PYTHONUNBUFFERED: "1" },
+    });
+  } else {
+    // Not root, use sudo with password
+    const sudoPassword = process.env.SUDO_PASSWORD || "";
+    hpingProc = spawn("sudo", ["-S", "hping3", "--udp", "--flood", "-d", "6500", "127.0.0.1", "-p", "9000"], {
+      env: { ...process.env, PYTHONUNBUFFERED: "1" },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    
+    // Write password to stdin
+    if (hpingProc.stdin) {
+      hpingProc.stdin.write(sudoPassword + "\n");
+      hpingProc.stdin.end();
+    }
+  }
+
+  simulation.processes.push(hpingProc);
+
+  const handleData = (data: Buffer) => {
+    const lines = data.toString().split("\n").filter((l: string) => l.trim());
+    for (const line of lines) {
+      // Skip password prompts
+      if (line.includes("[sudo]") || line.includes("password for")) {
+        continue;
+      }
+      let cleanLine = stripAnsi(line);
+      broadcast({
+        type: "log",
+        role: "eavesdropper",
+        message: `[hping3] ${cleanLine}`,
+        logType: "attack",
+        timestamp: new Date().toISOString(),
+      });
+    }
+  };
+
+  hpingProc.stdout?.on("data", handleData);
+  hpingProc.stderr?.on("data", handleData);
+
+  hpingProc.on("close", (code) => {
+    broadcast({
+      type: "log",
+      role: "eavesdropper",
+      message: `hping3 attack stopped (exit code: ${code})`,
+      logType: "info",
+      timestamp: new Date().toISOString(),
+    });
+  });
+
+  hpingProc.on("error", (err) => {
+    broadcast({
+      type: "log",
+      role: "eavesdropper",
+      message: `hping3 error: ${err.message}`,
+      logType: "attack",
+      timestamp: new Date().toISOString(),
+    });
+  });
 }
 
 // WebSocket connection handler
@@ -230,6 +435,14 @@ wss.on("connection", (ws) => {
       switch (msg.action) {
         case "start_eavesdropper":
           startEavesdropperDemo(msg.mode || "plain");
+          break;
+
+        case "start_ddos":
+          startDdosDemo(msg.mode || "plain");
+          break;
+
+        case "start_hping3":
+          startHping3();
           break;
 
         case "stop":

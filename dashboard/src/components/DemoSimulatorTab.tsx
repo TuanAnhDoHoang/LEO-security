@@ -10,6 +10,8 @@ interface LogEntry {
   timestamp: string
 }
 
+type AttackType = 'eavesdropper' | 'ddos' | 'jamming' | 'mitm';
+
 type SimStatus = 'idle' | 'running' | 'stopped' | 'starting' | 'error'
 
 const WS_URL = 'ws://localhost:3001'
@@ -17,6 +19,7 @@ const WS_URL = 'ws://localhost:3001'
 export default function DemoSimulatorTab({ active }: DemoSimulatorTabProps) {
   const [status, setStatus] = useState<SimStatus>('idle')
   const [mode, setMode] = useState('all')
+  const [phase, setPhase] = useState<string>('')
   const [senderLogs, setSenderLogs] = useState<LogEntry[]>([])
   const [receiverLogs, setReceiverLogs] = useState<LogEntry[]>([])
   const [eavesdropperLogs, setEavesdropperLogs] = useState<LogEntry[]>([])
@@ -60,6 +63,7 @@ export default function DemoSimulatorTab({ active }: DemoSimulatorTabProps) {
           if (data.status === 'running' || data.status === 'starting') setStatus('running')
           else if (data.status === 'stopped') setStatus('stopped')
           else setStatus(data.status as SimStatus)
+          if (data.phase) setPhase(data.phase)
         }
 
         if (data.type === 'log') {
@@ -118,10 +122,10 @@ export default function DemoSimulatorTab({ active }: DemoSimulatorTabProps) {
     }
   }, [connectWs])
 
-  function startSimulation() {
+  function startSimulation(attackType: AttackType) {
     if (wsRef.current?.readyState !== WebSocket.OPEN) {
       connectWs()
-      setTimeout(() => startSimulation(), 500)
+      setTimeout(() => startSimulation(attackType), 500)
       return
     }
 
@@ -134,7 +138,7 @@ export default function DemoSimulatorTab({ active }: DemoSimulatorTabProps) {
     setStatus('running')
 
     wsRef.current.send(JSON.stringify({
-      action: 'start_eavesdropper',
+      action: `start_${attackType}`,
       mode,
     }))
   }
@@ -179,10 +183,18 @@ export default function DemoSimulatorTab({ active }: DemoSimulatorTabProps) {
           {/* Attack buttons */}
           <button
             className={`btn btn-attack ${status === 'running' ? 'active-btn' : ''}`}
-            onClick={startSimulation}
+            onClick={() => startSimulation("eavesdropper")}
             disabled={status === 'running'}
           >
             👂 Eavesdropper
+          </button>
+
+          <button
+            className={`btn btn-attack ${status === 'running' ? 'active-btn' : ''}`}
+            onClick={() => startSimulation("ddos")}
+            disabled={status === 'running'}
+          >
+            � DDoS Attack
           </button>
 
           <button
@@ -292,6 +304,19 @@ export default function DemoSimulatorTab({ active }: DemoSimulatorTabProps) {
             <span className="role-name">Hacker</span>
             <span className="role-desc">Eavesdropper MitM</span>
             <span className="log-count">{eavesdropperLogs.length}</span>
+            {phase.includes('ddos') && (
+              <button
+                className="btn btn-attack-small"
+                onClick={() => {
+                  if (wsRef.current?.readyState === WebSocket.OPEN) {
+                    wsRef.current.send(JSON.stringify({ action: 'start_hping3' }))
+                  }
+                }}
+                title="Launch DDoS attack (hping3)"
+              >
+                🔨 Attack
+              </button>
+            )}
           </div>
           <div className="log-box">
             {eavesdropperLogs.length === 0 ? (
