@@ -1,0 +1,2 @@
+#!/bin/sh
+sudo iptables -F INPUT && sudo iptables -F FORWARD && sudo tc qdisc del dev lo root

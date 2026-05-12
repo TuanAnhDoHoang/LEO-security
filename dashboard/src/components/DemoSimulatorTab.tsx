@@ -30,6 +30,7 @@ export default function DemoSimulatorTab({ active }: DemoSimulatorTabProps) {
   const receiverEndRef = useRef<HTMLDivElement>(null)
   const eavesdropperEndRef = useRef<HTMLDivElement>(null)
   const systemEndRef = useRef<HTMLDivElement>(null)
+  const [wsReady, setWsReady] = useState(false)
 
   // Auto-scroll logs
   useEffect(() => {
@@ -53,6 +54,7 @@ export default function DemoSimulatorTab({ active }: DemoSimulatorTabProps) {
 
     ws.onopen = () => {
       console.log('WebSocket connected')
+      setWsReady(true)
     }
 
     ws.onmessage = (ev) => {
@@ -107,10 +109,12 @@ export default function DemoSimulatorTab({ active }: DemoSimulatorTabProps) {
 
     ws.onclose = () => {
       console.log('WebSocket disconnected')
+      setWsReady(false)
       setTimeout(connectWs, 2000)
     }
 
     ws.onerror = () => {
+      setWsReady(false)
       ws.close()
     }
   }, [])
@@ -121,6 +125,38 @@ export default function DemoSimulatorTab({ active }: DemoSimulatorTabProps) {
       wsRef.current?.close()
     }
   }, [connectWs])
+
+  function sendWsAction(action: string) {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ action }))
+      return true
+    }
+
+    setSystemLogs(prev => [...prev, {
+      id: ++logIdRef.current,
+      role: 'system',
+      message: `Cannot send ${action}: websocket not connected`,
+      logType: 'warn',
+      timestamp: new Date().toLocaleTimeString('vi-VN', { hour12: false }),
+    }])
+    return false
+  }
+
+  function startHping3Attack() {
+    sendWsAction('start_hping3')
+  }
+
+  function stopHping3Attack() {
+    sendWsAction('stop_hping3')
+  }
+
+  function createDdosRules() {
+    sendWsAction('create_ddos_rules')
+  }
+
+  function removeDdosRules() {
+    sendWsAction('remove_ddos_rules')
+  }
 
   function startSimulation(attackType: AttackType) {
     if (wsRef.current?.readyState !== WebSocket.OPEN) {
@@ -198,8 +234,8 @@ export default function DemoSimulatorTab({ active }: DemoSimulatorTabProps) {
           </button>
 
           <button
-            className="btn btn-attack"
-            disabled={true}
+            className={`btn btn-attack ${status === 'running' ? 'active-btn' : ''}`}
+            onClick={() => startSimulation("jamming")}
             title="Coming soon"
           >
             📡 RF Jamming
@@ -305,17 +341,43 @@ export default function DemoSimulatorTab({ active }: DemoSimulatorTabProps) {
             <span className="role-desc">Eavesdropper MitM</span>
             <span className="log-count">{eavesdropperLogs.length}</span>
             {phase.includes('ddos') && (
-              <button
-                className="btn btn-attack-small"
-                onClick={() => {
-                  if (wsRef.current?.readyState === WebSocket.OPEN) {
-                    wsRef.current.send(JSON.stringify({ action: 'start_hping3' }))
-                  }
-                }}
-                title="Launch DDoS attack (hping3)"
-              >
-                🔨 Attack
-              </button>
+              <>
+                <button
+                  className="btn btn-attack-small"
+                  onClick={startHping3Attack}
+                  disabled={!wsReady}
+                  title="Launch DDoS attack (hping3)"
+                >
+                  🔨 Attack
+                </button>
+
+                <button
+                  className="btn btn-stop btn-attack-small"
+                  onClick={stopHping3Attack}
+                  disabled={!wsReady}
+                  title="Stop hping3 attack"
+                >
+                  ⏹ Stop Attack
+                </button>
+
+                <button
+                  className="btn btn-attack-small"
+                  onClick={createDdosRules}
+                  disabled={!wsReady}
+                  title="Create DDoS mitigation rules"
+                >
+                  🛡 Create Rules
+                </button>
+
+                <button
+                  className="btn btn-stop btn-attack-small"
+                  onClick={removeDdosRules}
+                  disabled={!wsReady}
+                  title="Remove DDoS mitigation rules"
+                >
+                  🧹 Remove Rules
+                </button>
+              </>
             )}
           </div>
           <div className="log-box">

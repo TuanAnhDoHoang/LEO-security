@@ -1,11 +1,7 @@
 import socket
-import threading
 import random
 import time
-import sys
 import argparse
-import os
-import struct
 
 # ── Hypatia Steps ─────────────────────────────────────────────────────────────
 HYPATIA = {"delay_ms": 6.0, "jitter_ms": 0.9, "loss_pct": 0.1, "corrupt_pct": 0.01}

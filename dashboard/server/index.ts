@@ -12,9 +12,7 @@ import path from "path";
 import cors from "cors";
 
 import { fileURLToPath } from 'url';
-import dotenv from 'dotenv';
-
-dotenv.config();
+import 'dotenv/config';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -44,6 +42,8 @@ let simulation: SimulationState = {
   phase: "idle",
 };
 
+let hpingProcess: ChildProcess | null = null;
+
 function broadcast(data: object) {
   const msg = JSON.stringify(data);
   wss.clients.forEach((client) => {
@@ -70,10 +70,101 @@ function detectLogType(raw: string): string {
   return "info";
 }
 
+function attachProcessLogger(proc: ChildProcess, role: string, prefix = "") {
+  const handleData = (data: Buffer) => {
+    const lines = stripAnsi(data.toString()).split("\n").filter((l: string) => l.trim());
+    for (const line of lines) {
+      broadcast({
+        type: "log",
+        role,
+        message: prefix ? `${prefix} ${line}` : line,
+        logType: detectLogType(line),
+        timestamp: new Date().toISOString(),
+      });
+    }
+  };
+
+  proc.stdout?.on("data", handleData);
+  proc.stderr?.on("data", handleData);
+}
+
 function ddosDetectLogType(avgIntervalMs: number) {
   if (avgIntervalMs < 1.0)  return "attack";     // < 1ms   → TẤN CÔNG
   if (avgIntervalMs < 10.0) return "warn";  // < 10ms  → CẢNH BÁO
   return "secure";                             // ≥ 10ms  → BÌNH THƯỜNG
+}
+
+function runDdosRuleScript(scriptFile: string) {
+  broadcast({
+    type: "log",
+    role: "eavesdropper",
+    message: `Executing ${scriptFile}...`,
+    logType: "info",
+    timestamp: new Date().toISOString(),
+  });
+
+  const proc = spawn("sh", [`./${scriptFile}`], {
+    cwd: DDOS_DIR,
+    env: { ...process.env, PYTHONUNBUFFERED: "1" },
+  });
+
+  simulation.processes.push(proc);
+  attachProcessLogger(proc, "eavesdropper", `[${scriptFile}]`);
+
+  proc.on("close", (code) => {
+    broadcast({
+      type: "log",
+      role: "eavesdropper",
+      message: `${scriptFile} finished (exit code: ${code})`,
+      logType: code === 0 ? "secure" : "warn",
+      timestamp: new Date().toISOString(),
+    });
+  });
+
+  proc.on("error", (err) => {
+    broadcast({
+      type: "log",
+      role: "eavesdropper",
+      message: `${scriptFile} error: ${err.message}`,
+      logType: "attack",
+      timestamp: new Date().toISOString(),
+    });
+  });
+}
+
+function stopHping3() {
+  if (!hpingProcess || !hpingProcess.pid) {
+    broadcast({
+      type: "log",
+      role: "eavesdropper",
+      message: "No active hping3 attack to stop.",
+      logType: "warn",
+      timestamp: new Date().toISOString(),
+    });
+    return;
+  }
+
+  broadcast({
+    type: "log",
+    role: "eavesdropper",
+    message: "Stopping hping3 DDoS attack...",
+    logType: "attack",
+    timestamp: new Date().toISOString(),
+  });
+
+  try {
+    process.kill(-hpingProcess.pid, "SIGTERM");
+  } catch {
+    // ignore
+  }
+
+  try {
+    hpingProcess.kill("SIGTERM");
+  } catch {
+    // ignore
+  }
+
+  hpingProcess = null;
 }
 
 function killAllProcesses() {
@@ -395,7 +486,13 @@ function startHping3() {
   hpingProc.stdout?.on("data", handleData);
   hpingProc.stderr?.on("data", handleData);
 
+  hpingProcess = hpingProc;
+  simulation.processes.push(hpingProc);
+
   hpingProc.on("close", (code) => {
+    if (hpingProcess === hpingProc) {
+      hpingProcess = null;
+    }
     broadcast({
       type: "log",
       role: "eavesdropper",
@@ -416,6 +513,53 @@ function startHping3() {
   });
 }
 
+async function startJammingDemo(mode: string){
+  killAllProcesses();
+
+  simulation.running = true;
+  simulation.phase = `ddos-${mode}`;
+
+  broadcast({
+    type: "status",
+    status: "starting",
+    phase: simulation.phase,
+    message: `Starting individual jamming components (${mode})...`,
+  });
+
+  try {
+    // 1. Receiver & Key Server
+    ddosSpawnScript("receiver.py", ["--local"], "receiver");
+
+    // 2. Satellite C (near receiver)
+    ddosSpawnScript("satellite.py", ["127.0.0.1", "127.0.0.1", "9000", "9001"], "system");
+
+    // 3. Satellite B (middle relay)
+    ddosSpawnScript("satellite.py", ["127.0.0.1", "127.0.0.1", "9001", "9002"], "system");
+
+    // Wait for servers to bind
+    await new Promise(resolve => setTimeout(resolve, 1500));
+
+    // 5. Sender (client)
+    const senderProc = ddosSpawnScript("sender.py", [mode, "--local"], "sender");
+
+    senderProc.on("close", (code) => {
+      simulation.running = false;
+      broadcast({
+        type: "status",
+        status: "stopped",
+        message: `Simulation finished (sender exit code: ${code})`,
+      });
+    });
+
+  } catch (err: any) {
+    simulation.running = false;
+    broadcast({
+      type: "error",
+      message: `Failed to start simulation: ${err.message}`,
+    });
+  }
+}
+
 // WebSocket connection handler
 wss.on("connection", (ws) => {
   console.log("Client connected");
@@ -433,16 +577,30 @@ wss.on("connection", (ws) => {
       const msg = JSON.parse(raw.toString());
 
       switch (msg.action) {
+        //eavesdropper
         case "start_eavesdropper":
           startEavesdropperDemo(msg.mode || "plain");
           break;
 
+        //ddoss
         case "start_ddos":
           startDdosDemo(msg.mode || "plain");
           break;
 
         case "start_hping3":
           startHping3();
+          break;
+
+        case "stop_hping3":
+          stopHping3();
+          break;
+
+        case "create_ddos_rules":
+          runDdosRuleScript("ddos_rule");
+          break;
+
+        case "remove_ddos_rules":
+          runDdosRuleScript("remove_rules");
           break;
 
         case "stop":
@@ -454,6 +612,11 @@ wss.on("connection", (ws) => {
           });
           break;
 
+        //jamming
+        case "start_jamming":
+          startJammingDemo(msg.mode || "plain");
+          break;
+        
         default:
           ws.send(JSON.stringify({ type: "error", message: `Unknown action: ${msg.action}` }));
       }

@@ -1,0 +1,17 @@
+#!/bin/sh
+
+# INPUT chain
+sudo iptables -A INPUT -p udp --dport 9000 -m length --length 1000:65535 -j DROP
+sudo iptables -A INPUT -p udp --dport 9000 -m hashlimit \
+  --hashlimit-name udp_limit \
+  --hashlimit-above 50/sec \
+  --hashlimit-mode srcip \
+  --hashlimit-burst 100 \
+  -j DROP
+
+# FORWARD chain
+sudo iptables -A FORWARD -p udp --dport 9000 -m length --length 1500:65535 -j DROP
+
+sudo tc qdisc add dev lo root handle 1: prio
+sudo tc qdisc add dev lo parent 1:3 handle 30: tbf rate 1mbit burst 2kb latency 1ms
+sudo tc filter add dev lo parent 1:0 protocol ip handle 1 fw flowid 1:3
