@@ -236,15 +236,15 @@ export default function DemoSimulatorTab({ active }: DemoSimulatorTabProps) {
           <button
             className={`btn btn-attack ${status === 'running' ? 'active-btn' : ''}`}
             onClick={() => startSimulation("jamming")}
-            title="Coming soon"
+            disabled={status === 'running'}
           >
             📡 RF Jamming
           </button>
 
           <button
-            className="btn btn-attack"
-            disabled={true}
-            title="Coming soon"
+            className={`btn btn-attack ${status === 'running' ? 'active-btn' : ''}`}
+            onClick={() => startSimulation("mitm")}
+            disabled={status === 'running'}
           >
             🔁 Replay MITM
           </button>
