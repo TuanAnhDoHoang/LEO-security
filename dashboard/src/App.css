@@ -205,6 +205,141 @@
   flex-wrap: wrap;
 }
 
+.sim-visual-panel {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.sim-visual-header {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 14px;
+}
+
+.sim-mode-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.atk-btn {
+  padding: 8px 14px;
+  border-radius: 7px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  font-family: 'Share Tech Mono', monospace;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  transition: transform 0.2s ease, background 0.2s ease, border-color 0.2s ease;
+}
+
+.atk-btn:hover {
+  transform: translateY(-1px);
+}
+
+.atk-btn.active {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.atk-btn.normal {
+  color: #4aaeff;
+  border-color: rgba(74, 174, 255, 0.35);
+}
+
+.atk-btn.eavesdrop {
+  color: #a78bfa;
+  border-color: rgba(167, 139, 250, 0.35);
+}
+
+.atk-btn.ddos {
+  color: #f87171;
+  border-color: rgba(248, 113, 113, 0.4);
+}
+
+.atk-btn.relay {
+  color: #fb923c;
+  border-color: rgba(251, 146, 60, 0.4);
+}
+
+.atk-btn.mitm {
+  color: #f472b6;
+  border-color: rgba(244, 114, 182, 0.4);
+}
+
+.atk-btn.reset {
+  color: var(--dim);
+  border-color: rgba(148, 163, 184, 0.35);
+}
+
+.sim-visual-body {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.sim-canvas-wrapper {
+  flex: 1;
+  min-width: 280px;
+}
+
+.sim-canvas {
+  width: 100%;
+  height: 340px;
+  border-radius: 12px;
+  border: 1px solid rgba(0, 229, 255, 0.15);
+  background: #010812;
+  display: block;
+}
+
+.sim-visual-sidebar {
+  width: 320px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.sim-stat-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 14px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.03);
+  font-family: 'Share Tech Mono', monospace;
+  font-size: 11px;
+  color: var(--dim);
+}
+
+.sim-log-panel {
+  min-height: 240px;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.sim-log-box {
+  flex: 1;
+  min-height: 0;
+}
+
+@media (max-width: 980px) {
+  .sim-visual-body {
+    flex-direction: column;
+  }
+
+  .sim-visual-sidebar {
+    width: 100%;
+  }
+}
+
 .btn {
   padding: 10px 22px;
   border-radius: 6px;

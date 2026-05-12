@@ -1,0 +1,479 @@
+
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+#sim-root{font-family:var(--font-mono,"Courier New",monospace);background:transparent;padding:0 0 1rem}
+.ctrl-bar{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px;padding:0 2px}
+.atk-btn{padding:7px 14px;border-radius:6px;border:1px solid;font-size:12px;cursor:pointer;font-family:inherit;font-weight:500;transition:all .15s;background:transparent}
+.atk-btn.normal{color:#4aaeff;border-color:#4aaeff44}
+.atk-btn.normal:hover,.atk-btn.normal.active{background:#4aaeff22;border-color:#4aaeff}
+.atk-btn.eavesdrop{color:#a78bfa;border-color:#a78bfa44}
+.atk-btn.eavesdrop:hover,.atk-btn.eavesdrop.active{background:#a78bfa22;border-color:#a78bfa}
+.atk-btn.ddos{color:#f87171;border-color:#f87171aa}
+.atk-btn.ddos:hover,.atk-btn.ddos.active{background:#f8717122;border-color:#f87171}
+.atk-btn.relay{color:#fb923c;border-color:#fb923c44}
+.atk-btn.relay:hover,.atk-btn.relay.active{background:#fb923c22;border-color:#fb923c}
+.atk-btn.mitm{color:#f472b6;border-color:#f472b644}
+.atk-btn.mitm:hover,.atk-btn.mitm.active{background:#f472b622;border-color:#f472b6}
+.atk-btn.reset{color:var(--color-text-tertiary);border-color:var(--color-border-tertiary)}
+.atk-btn.reset:hover{background:var(--color-background-secondary)}
+.sim-layout{display:grid;grid-template-columns:1fr 260px;gap:12px}
+@media(max-width:600px){.sim-layout{grid-template-columns:1fr}.log-panel{max-height:140px}}
+canvas#sim-cv{width:100%;border-radius:8px;border:1px solid var(--color-border-tertiary);display:block;background:transparent}
+.log-panel{border:1px solid var(--color-border-tertiary);border-radius:8px;padding:10px;overflow-y:auto;max-height:340px;min-height:120px}
+.log-panel h3{font-size:11px;color:var(--color-text-tertiary);letter-spacing:.06em;margin-bottom:8px;font-weight:500}
+.log-entry{font-size:11px;padding:3px 0;border-bottom:1px solid var(--color-border-tertiary);color:var(--color-text-secondary);line-height:1.4}
+.log-entry:last-child{border-bottom:none}
+.log-entry.ok{color:#4aaeff}
+.log-entry.warn{color:#f87171}
+.log-entry.atk{color:#f472b6}
+.log-entry.sniff{color:#a78bfa}
+.log-entry.relay{color:#fb923c}
+.status-bar{display:flex;gap:12px;flex-wrap:wrap;margin-top:10px;padding:0 2px}
+.stat{font-size:11px;color:var(--color-text-tertiary);padding:4px 10px;border:1px solid var(--color-border-tertiary);border-radius:4px}
+.stat span{color:var(--color-text-primary);font-weight:500}
+</style>
+
+<div id="sim-root">
+  <h2 class="sr-only">LEO satellite network security attack simulation — interactive canvas showing eavesdropping, DDoS, relay, and MitM attack patterns</h2>
+  <div class="ctrl-bar">
+    <button class="atk-btn normal" onclick="runMode('normal')">📡 Normal</button>
+    <button class="atk-btn eavesdrop" onclick="runMode('eavesdrop')">👂 Eavesdrop</button>
+    <button class="atk-btn ddos" onclick="runMode('ddos')">💥 DDoS</button>
+    <button class="atk-btn relay" onclick="runMode('relay')">🚫 Relay Jam</button>
+    <button class="atk-btn mitm" onclick="runMode('mitm')">🕵️ MitM</button>
+    <button class="atk-btn reset" onclick="runMode(null)">⟳ Reset</button>
+  </div>
+  <div class="sim-layout">
+    <canvas id="sim-cv" height="340"></canvas>
+    <div class="log-panel">
+      <h3>EVENT LOG</h3>
+      <div id="log-entries"></div>
+    </div>
+  </div>
+  <div class="status-bar">
+    <div class="stat">Mode: <span id="st-mode">Idle</span></div>
+    <div class="stat">Packets: <span id="st-pkt">0</span></div>
+    <div class="stat">Intercepted: <span id="st-int">0</span></div>
+    <div class="stat">Dropped: <span id="st-drop">0</span></div>
+  </div>
+</div>
+
+<script>
+const cv = document.getElementById('sim-cv');
+const ctx = cv.getContext('2d');
+const logEl = document.getElementById('log-entries');
+
+let W, H, animId, particles=[], mode=null, tick=0;
+let stats={pkt:0,intercepted:0,dropped:0};
+
+function resize(){
+  W = cv.offsetWidth||480; H=340;
+  cv.width=W; cv.height=H;
+}
+resize(); window.addEventListener('resize',()=>{resize();draw();});
+
+const COLORS={
+  sat:'#4aaeff', gs:'#34d399', user:'#fbbf24',
+  atk:'#f87171', link:'rgba(74,174,255,0.35)',
+  normal:'#4aaeff', sniff:'#a78bfa', ddos:'#f87171',
+  relay:'#fb923c', mitm:'#f472b6', blocked:'#374151'
+};
+
+function lerp(a,b,t){return a+(b-a)*t}
+
+const MODES={
+  normal:{
+    label:'Normal Transmission',
+    nodes:{
+      sat1:{label:'SAT-1',type:'sat',xr:.28,yr:.22},
+      sat2:{label:'SAT-2',type:'sat',xr:.72,yr:.22},
+      gs1:{label:'GS-Alpha',type:'gs',xr:.18,yr:.78},
+      gs2:{label:'GS-Beta',type:'gs',xr:.82,yr:.78},
+    },
+    links:[
+      {a:'gs1',b:'sat1',style:'normal'},
+      {a:'sat1',b:'sat2',style:'normal'},
+      {a:'sat2',b:'gs2',style:'normal'},
+    ],
+    flows:[
+      {path:['gs1','sat1','sat2','gs2'],color:COLORS.normal,label:'DATA',delay:0},
+      {path:['gs2','sat2','sat1','gs1'],color:'#34d399',label:'ACK',delay:60},
+    ]
+  },
+  eavesdrop:{
+    label:'Eavesdropper Attack',
+    nodes:{
+      sat1:{label:'SAT-1',type:'sat',xr:.25,yr:.2},
+      sat2:{label:'SAT-2',type:'sat',xr:.5,yr:.18},
+      sat3:{label:'SAT-3',type:'sat',xr:.75,yr:.2},
+      gs1:{label:'GS-Source',type:'gs',xr:.15,yr:.78},
+      gs2:{label:'GS-Dest',type:'gs',xr:.85,yr:.78},
+      hacker:{label:'HACKER',type:'hacker',xr:.22,yr:.48},
+    },
+    links:[
+      {a:'gs1',b:'sat1',style:'normal'},
+      {a:'sat1',b:'sat2',style:'normal'},
+      {a:'sat2',b:'sat3',style:'normal'},
+      {a:'sat3',b:'gs2',style:'normal'},
+      {a:'hacker',b:'sat1',style:'sniff',dashed:true},
+    ],
+    flows:[
+      {path:['gs1','sat1','sat2','sat3','gs2'],color:COLORS.normal,label:'DATA',delay:0},
+      {path:['gs1','sat1'],color:COLORS.sniff,label:'COPY',delay:30,fork:'hacker',forkAt:1},
+    ],
+    note:'Hacker passively copies traffic on GS-Alpha → SAT-1 link'
+  },
+  ddos:{
+    label:'DDoS Attack',
+    nodes:{
+      sat1:{label:'SAT-1',type:'sat',xr:.35,yr:.22},
+      sat2:{label:'SAT-2',type:'sat',xr:.65,yr:.22},
+      gs1:{label:'GS-Send',type:'gs',xr:.15,yr:.78},
+      gs2:{label:'GS-Recv',type:'gs',xr:.85,yr:.78},
+      hacker:{label:'HACKER',type:'hacker',xr:.5,yr:.62},
+    },
+    links:[
+      {a:'gs1',b:'sat1',style:'normal'},
+      {a:'sat1',b:'sat2',style:'normal'},
+      {a:'sat2',b:'gs2',style:'normal'},
+      {a:'hacker',b:'sat1',style:'ddos',dashed:true},
+    ],
+    flows:[
+      {path:['gs1','sat1','sat2','gs2'],color:COLORS.normal,label:'DATA',delay:0,dropAt:1},
+      {path:['hacker','sat1'],color:COLORS.ddos,label:'FLOOD',delay:5,repeat:3},
+      {path:['hacker','sat1'],color:COLORS.ddos,label:'FLOOD',delay:20,repeat:3},
+      {path:['hacker','sat1'],color:COLORS.ddos,label:'JUNK',delay:35,repeat:3},
+      {path:['sat1','sat2','gs2'],color:'#f87171',label:'TOXIC',delay:55,dim:true},
+    ],
+    note:'DDoS floods SAT-1 — degraded traffic reaches GS-Recv'
+  },
+  relay:{
+    label:'Relay Jamming Attack',
+    nodes:{
+      sat1:{label:'SAT-1',type:'sat',xr:.3,yr:.22},
+      sat2:{label:'SAT-2',type:'sat',xr:.7,yr:.22},
+      gs1:{label:'GS-Send',type:'gs',xr:.2,yr:.78},
+      gs2:{label:'GS-Recv',type:'gs',xr:.8,yr:.78},
+      hacker:{label:'HACKER',type:'hacker',xr:.5,yr:.12},
+    },
+    links:[
+      {a:'gs1',b:'sat1',style:'blocked'},
+      {a:'sat1',b:'sat2',style:'normal'},
+      {a:'sat2',b:'gs2',style:'normal'},
+      {a:'hacker',b:'sat1',style:'relay',dashed:true},
+      {a:'hacker',b:'sat2',style:'relay',dashed:true},
+    ],
+    flows:[
+      {path:['gs1','sat1'],color:COLORS.normal,label:'DATA',delay:0,blocked:true},
+      {path:['hacker','sat1'],color:COLORS.relay,label:'JAM',delay:8,repeat:2},
+      {path:['hacker','sat2'],color:COLORS.relay,label:'JAM',delay:18,repeat:2},
+      {path:['hacker','sat1'],color:COLORS.relay,label:'JAM',delay:45,repeat:2},
+    ],
+    note:'Hacker jams both satellites — sender cannot reach receiver'
+  },
+  mitm:{
+    label:'Man-in-the-Middle Attack',
+    nodes:{
+      sat1:{label:'SAT-1',type:'sat',xr:.22,yr:.22},
+      sat2:{label:'SAT-2',type:'sat',xr:.78,yr:.22},
+      gs1:{label:'GS-Alpha',type:'gs',xr:.12,yr:.78},
+      gs2:{label:'GS-Beta',type:'gs',xr:.88,yr:.78},
+      hacker:{label:'HACKER',type:'hacker',xr:.5,yr:.25},
+    },
+    links:[
+      {a:'gs1',b:'sat1',style:'normal'},
+      {a:'sat1',b:'hacker',style:'mitm',dashed:true},
+      {a:'hacker',b:'sat2',style:'mitm',dashed:true},
+      {a:'sat2',b:'gs2',style:'normal'},
+    ],
+    flows:[
+      {path:['gs1','sat1','hacker'],color:COLORS.normal,label:'DATA',delay:0},
+      {path:['hacker','sat2','gs2'],color:COLORS.mitm,label:'FAKED',delay:50},
+    ],
+    note:'Hacker intercepts SAT-1↔SAT-2 ISL, relays modified data'
+  }
+};
+
+function nodePos(key,cfg){
+  const n=cfg.nodes[key];
+  return {x:n.xr*W, y:n.yr*H};
+}
+
+function addLog(msg, cls=''){
+  const ts=new Date().toLocaleTimeString('en',{hour12:false,hour:'2-digit',minute:'2-digit',second:'2-digit'});
+  const d=document.createElement('div');
+  d.className='log-entry '+cls;
+  d.textContent=`[${ts}] ${msg}`;
+  logEl.prepend(d);
+  while(logEl.children.length>40) logEl.lastChild.remove();
+}
+
+function updateStats(){
+  document.getElementById('st-mode').textContent=mode?MODES[mode].label:'Idle';
+  document.getElementById('st-pkt').textContent=stats.pkt;
+  document.getElementById('st-int').textContent=stats.intercepted;
+  document.getElementById('st-drop').textContent=stats.dropped;
+}
+
+function spawnFlow(flow, cfg){
+  const pts = flow.path.map(k=>nodePos(k,cfg));
+  const p={
+    pts, color:flow.color||COLORS.normal,
+    label:flow.label||'PKT', t:0, speed:0.008+(Math.random()*0.004),
+    done:false, dim:flow.dim||false,
+    blocked:flow.blocked||false,
+    fork:flow.fork?nodePos(flow.fork,cfg):null,
+    forkAt:flow.forkAt||null,
+    forkDone:false,
+    forkT:0
+  };
+  particles.push(p);
+}
+
+function draw(){
+  ctx.clearRect(0,0,W,H);
+  if(!mode) return drawIdle();
+  const cfg=MODES[mode];
+  drawLinks(cfg);
+  drawNodes(cfg);
+  drawParticles(cfg);
+}
+
+function drawIdle(){
+  ctx.fillStyle='rgba(74,174,255,0.06)';
+  ctx.fillRect(0,0,W,H);
+  ctx.fillStyle='rgba(74,174,255,0.3)';
+  ctx.font=`14px ${getComputedStyle(document.body).fontFamily||'monospace'}`;
+  ctx.textAlign='center';
+  ctx.fillText('Select a simulation mode above',W/2,H/2);
+  ctx.textAlign='left';
+}
+
+function linkStyle(s){
+  if(s==='sniff') return {color:'rgba(167,139,250,0.5)',dash:[5,4]};
+  if(s==='ddos') return {color:'rgba(248,113,113,0.6)',dash:[4,3]};
+  if(s==='relay') return {color:'rgba(251,146,60,0.55)',dash:[5,3]};
+  if(s==='mitm') return {color:'rgba(244,114,182,0.6)',dash:[4,3]};
+  if(s==='blocked') return {color:'rgba(55,65,81,0.5)',dash:[2,5]};
+  return {color:'rgba(74,174,255,0.25)',dash:[]};
+}
+
+function drawLinks(cfg){
+  cfg.links.forEach(l=>{
+    const a=nodePos(l.a,cfg), b=nodePos(l.b,cfg);
+    const st=linkStyle(l.style);
+    ctx.beginPath();
+    ctx.moveTo(a.x,a.y); ctx.lineTo(b.x,b.y);
+    ctx.strokeStyle=st.color;
+    ctx.lineWidth=1.2;
+    ctx.setLineDash(st.dash||[]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  });
+}
+
+function drawNodes(cfg){
+  Object.entries(cfg.nodes).forEach(([k,n])=>{
+    const x=n.xr*W, y=n.yr*H;
+    if(n.type==='sat'){
+      drawSat(x,y,n.label);
+    } else if(n.type==='gs'){
+      drawGS(x,y,n.label);
+    } else if(n.type==='hacker'){
+      drawHacker(x,y,n.label);
+    }
+  });
+  if(cfg.note){
+    ctx.fillStyle='rgba(255,255,255,0.25)';
+    ctx.font=`10px monospace`;
+    ctx.textAlign='center';
+    ctx.fillText(cfg.note,W/2,H-10);
+    ctx.textAlign='left';
+  }
+}
+
+function drawSat(x,y,label){
+  ctx.save();
+  ctx.shadowColor=COLORS.sat; ctx.shadowBlur=8;
+  ctx.beginPath(); ctx.arc(x,y,7,0,Math.PI*2);
+  ctx.fillStyle=COLORS.sat; ctx.fill();
+  ctx.shadowBlur=0;
+  ctx.restore();
+  ctx.fillStyle='rgba(74,174,255,0.85)';
+  ctx.font='10px monospace';
+  ctx.textAlign='center';
+  ctx.fillText(label,x,y-13);
+  ctx.textAlign='left';
+}
+
+function drawGS(x,y,label){
+  ctx.save();
+  ctx.shadowColor=COLORS.gs; ctx.shadowBlur=8;
+  ctx.beginPath(); ctx.arc(x,y,8,0,Math.PI*2);
+  ctx.fillStyle=COLORS.gs; ctx.fill();
+  ctx.shadowBlur=0;
+  ctx.restore();
+  ctx.fillStyle='rgba(52,211,153,0.85)';
+  ctx.font='10px monospace';
+  ctx.textAlign='center';
+  ctx.fillText(label,x,y+20);
+  ctx.textAlign='left';
+}
+
+function drawHacker(x,y,label){
+  ctx.save();
+  ctx.shadowColor=COLORS.atk; ctx.shadowBlur=14;
+  ctx.beginPath(); ctx.arc(x,y,9,0,Math.PI*2);
+  ctx.fillStyle=COLORS.atk; ctx.fill();
+  ctx.strokeStyle='rgba(248,113,113,0.5)'; ctx.lineWidth=2;
+  ctx.stroke();
+  ctx.shadowBlur=0;
+  ctx.restore();
+  ctx.fillStyle='rgba(248,113,113,0.9)';
+  ctx.font='bold 10px monospace';
+  ctx.textAlign='center';
+  ctx.fillText(label,x,y-15);
+  ctx.textAlign='left';
+}
+
+function drawParticles(cfg){
+  particles.forEach(p=>{
+    if(p.done) return;
+    const seg=Math.floor(p.t*(p.pts.length-1));
+    const st=seg/(p.pts.length-1);
+    const en=(seg+1)/(p.pts.length-1);
+    const lt=(p.t-st)/(en-st+0.0001);
+    const a=p.pts[Math.min(seg,p.pts.length-2)];
+    const b=p.pts[Math.min(seg+1,p.pts.length-1)];
+    const px=lerp(a.x,b.x,lt), py=lerp(a.y,b.y,lt);
+
+    ctx.save();
+    ctx.globalAlpha=p.dim?0.45:1;
+    ctx.shadowColor=p.color; ctx.shadowBlur=10;
+    ctx.beginPath(); ctx.arc(px,py,4,0,Math.PI*2);
+    ctx.fillStyle=p.blocked&&p.t>0.85?COLORS.blocked:p.color;
+    ctx.fill();
+    ctx.shadowBlur=0;
+    if(p.label){
+      ctx.fillStyle=p.dim?'rgba(255,255,255,0.4)':'rgba(255,255,255,0.85)';
+      ctx.font='9px monospace';
+      ctx.fillText(p.label,px+6,py-4);
+    }
+    ctx.restore();
+
+    if(p.fork&&p.forkAt!==null){
+      const forkProgress=p.forkAt/(p.pts.length-1);
+      if(p.t>=forkProgress&&!p.forkDone){
+        const fa=p.pts[p.forkAt];
+        const fb=p.fork;
+        const ft=Math.min((p.t-forkProgress)/(1-forkProgress)*2.5,1);
+        const fpx=lerp(fa.x,fb.x,ft), fpy=lerp(fa.y,fb.y,ft);
+        ctx.save();
+        ctx.shadowColor=COLORS.sniff; ctx.shadowBlur=8;
+        ctx.beginPath(); ctx.arc(fpx,fpy,4,0,Math.PI*2);
+        ctx.fillStyle=COLORS.sniff; ctx.fill();
+        ctx.shadowBlur=0;
+        ctx.fillStyle='rgba(167,139,250,0.85)';
+        ctx.font='9px monospace'; ctx.fillText('COPY',fpx+6,fpy-4);
+        ctx.restore();
+        if(ft>=1) p.forkDone=true;
+      }
+    }
+  });
+}
+
+function animate(){
+  tick++;
+  particles.forEach(p=>{
+    if(p.done) return;
+    p.t=Math.min(p.t+p.speed,1);
+    if(p.t>=1) p.done=true;
+  });
+  particles=particles.filter(p=>!p.done);
+  draw();
+  animId=requestAnimationFrame(animate);
+}
+
+let flowQueues=[], flowIdx=0;
+
+function scheduleFlows(cfg){
+  flowQueues=[];
+  if(!cfg.flows) return;
+  cfg.flows.forEach(f=>{
+    const times=f.repeat||1;
+    for(let i=0;i<times;i++){
+      flowQueues.push({ticks:(f.delay||0)+(i*40),flow:f});
+    }
+  });
+}
+
+let schedTick=0;
+
+function animateWithFlows(){
+  tick++; schedTick++;
+  flowQueues.forEach(q=>{
+    if(q.ticks===schedTick){
+      const cfg=MODES[mode];
+      spawnFlow(q.flow,cfg);
+      stats.pkt++;
+      if(q.flow.blocked) stats.dropped++;
+      if(q.flow.color===COLORS.sniff||q.flow.color===COLORS.mitm) stats.intercepted++;
+      if(q.flow.color===COLORS.ddos) stats.dropped++;
+      logEvent(q.flow);
+      updateStats();
+    }
+  });
+  particles.forEach(p=>{
+    if(p.done) return;
+    p.t=Math.min(p.t+p.speed,1);
+    if(p.t>=1) p.done=true;
+  });
+  particles=particles.filter(p=>!p.done);
+  if(schedTick>180){schedTick=0;scheduleFlows(MODES[mode]);}
+  draw();
+  animId=requestAnimationFrame(animateWithFlows);
+}
+
+function logEvent(flow){
+  const msgs={
+    'DATA':{msg:`Packet DATA routed: ${flow.path?.join(' → ')||''}`,cls:'ok'},
+    'ACK':{msg:`ACK returned via ${flow.path?.join(' → ')||''}`,cls:'ok'},
+    'COPY':{msg:`INTERCEPTED: copy captured on ${flow.path?.[0]||''} → ${flow.path?.[1]||''} link`,cls:'sniff'},
+    'FLOOD':{msg:`DDoS FLOOD packet hitting ${flow.path?.[1]||flow.path?.[0]||''}`,cls:'warn'},
+    'JUNK':{msg:`JUNK traffic injected into ${flow.path?.[1]||''}`,cls:'warn'},
+    'TOXIC':{msg:`Degraded packet forwarded to receiver`,cls:'warn'},
+    'JAM':{msg:`JAM signal disrupting ${flow.path?.[1]||''} — link blocked`,cls:'relay'},
+    'FAKED':{msg:`MitM MODIFIED packet relayed to ${flow.path?.[flow.path.length-1]||''}`,cls:'atk'},
+  };
+  const e=msgs[flow.label]||{msg:`Packet ${flow.label||''}`,cls:'ok'};
+  addLog(e.msg, e.cls);
+}
+
+function runMode(m){
+  cancelAnimationFrame(animId);
+  particles=[];
+  mode=m;
+  tick=0; schedTick=0;
+  if(!m){
+    stats={pkt:0,intercepted:0,dropped:0};
+    logEl.innerHTML='';
+    draw();
+    updateStats();
+    document.querySelectorAll('.atk-btn').forEach(b=>b.classList.remove('active'));
+    return;
+  }
+  document.querySelectorAll('.atk-btn').forEach(b=>{
+    b.classList.toggle('active',b.getAttribute('onclick').includes(`'${m}'`));
+  });
+  stats={pkt:0,intercepted:0,dropped:0};
+  logEl.innerHTML='';
+  addLog(`=== ${MODES[m].label.toUpperCase()} ===`,'ok');
+  if(MODES[m].note) addLog(MODES[m].note,'');
+  const cfg=MODES[m];
+  scheduleFlows(cfg);
+  animateWithFlows();
+  updateStats();
+}
+
+draw();
+</script>
