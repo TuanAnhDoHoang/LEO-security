@@ -10,5 +10,9 @@ services:
       - /app/dashboard/node_modules
     environment:
       - NODE_ENV=development
+    cap_add:
+      - NET_ADMIN
+    sysctls:             # Tùy chọn 2: Nếu dùng network mặc định của docker
+      - net.ipv4.ip_forward=1
     restart: unless-stopped
 
